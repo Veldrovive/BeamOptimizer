@@ -1,5 +1,8 @@
 import numpy as np
-from scipy.optimize import LinearConstraint, NonlinearConstraint, minimize
+from scipy.optimize import minimize
+from scipy.ndimage import median_filter
+import matplotlib.pyplot as plt
+import os
 
 def area(web_height, flange_width, glue_width, bridge_width, bridge_length, thickness, a):
     num_diaphragms = np.ceil(bridge_length / a)
@@ -9,11 +12,9 @@ def area(web_height, flange_width, glue_width, bridge_width, bridge_length, thic
     web_area = 2 * bridge_length * (web_height - thickness)
     return deck_area + diaphragm_area + glue_pad_area + web_area
 
-def get_max_force(web_height, flange_width, glue_width, a = 300):
+def get_max_force(web_height, flange_width, glue_width, a = 300, moment = 280, shear = 1):
     bridge_width = 120
     bridge_length = 950
-    moment = 225
-    shear = 0.75
     max_tensile_stress = 30
     max_compressive_stress = 6
     max_shear = 4
@@ -127,6 +128,46 @@ def optimize(web_height_guess = 100, flange_guess = 20, glue_guess = 5, a_guess 
     res = minimize(optimize, [web_height_guess, flange_guess, glue_guess, a_guess], constraints=cons, options={'verbose': 1})
     return res.x
 
+def optimize_glue_flange(flange_guess, glue_guess, web_height, a, max_area = 813 * 1016):
+    bridge_width = 120
+    thickness = 1.27
+    max_web_height = 250
+    max_glue_width = 30
+    def area_con(x):
+        flange_width, glue_width= x
+        return max_area - area(web_height, flange_width, glue_width, bridge_width, 950, thickness, a)
+    def flange_con(x):
+        flange_width, glue_width = x
+        return bridge_width / 2 - 2 * glue_width - flange_width
+    def web_con(x):
+        flange_width, glue_width = x
+        return web_height
+    def web_con_2(x):
+        flange_width, glue_width = x
+        return max_web_height - web_height
+    def glue_con(x):
+        flange_width, glue_width = x
+        return glue_width
+    def glue_con_2(x):
+        flange_width, glue_width = x
+        return max_glue_width - glue_width
+    def a_con(x):
+        flange_width, glue_width = x
+        return a - 20
+    def optimize(x):
+        flange_width, glue_width = x
+        # print("Running optimize", web_height, flange_width, glue_width, get_max_force(web_height, flange_width, glue_width))
+        return -1 * get_max_force(web_height, flange_width, glue_width, a)
+
+    cons = [
+        {'type': 'ineq', 'fun': area_con},
+        {'type': 'ineq', 'fun': flange_con},
+        {'type': 'ineq', 'fun': glue_con},
+        {'type': 'ineq', 'fun': glue_con_2}
+    ]
+    res = minimize(optimize, [flange_guess, glue_guess], constraints=cons)
+    return get_max_force(web_height, res.x[0], res.x[1], a)
+
 def search(params, max_area, bridge_length):
     start_web_height, start_flange_width, start_glue_width, start_a = params
     best_web_height, best_flange_width, best_glue_width, best_a = optimize(start_web_height, start_flange_width, start_glue_width, start_a)
@@ -136,7 +177,7 @@ def search(params, max_area, bridge_length):
     best_num_diaphragms = np.ceil(bridge_length / best_a)
     return best_max_force, area_left, best_web_height, best_flange_width, best_glue_width, best_a, best_num_diaphragms
 
-def search_area(web_height_mm, flange_width_mm, glue_width_mm, a_mm, max_area=813 * 1016, bridge_length=950):
+def search_area(web_height_mm, flange_width_mm, glue_width_mm, a_mm, max_area=813 * 1016, bridge_length=950, moment=280, shear=1):
     min_wh, max_wh, steps_wh = web_height_mm
     min_fw, max_fw, steps_fw = flange_width_mm
     min_gw, max_gw, steps_gw = glue_width_mm
@@ -162,6 +203,34 @@ def search_area(web_height_mm, flange_width_mm, glue_width_mm, a_mm, max_area=81
                         print("New Best:", best_max_force)
     return search(best[1], max_area, bridge_length)
 
+def plot_max_forces(dim = 100, wh_range = [50, 300], a_range=[10, 200], img_folder = 'imgs', optimize = False, filter = 0):
+    max_forces = np.zeros((dim, dim))
+    wh_linspace = np.linspace(wh_range[0], wh_range[1], dim)  # Y axis
+    a_linspace = np.linspace(a_range[0], a_range[1], dim)  # X axis
+    for i, wh in enumerate(wh_linspace):
+        for j, a in enumerate(a_linspace):
+            if optimize:
+                max_forces[i, j] = max(optimize_glue_flange(27.6, 1.65, wh, a), 0)
+            else:
+                max_forces[i, j] = get_max_force(wh, 27.6, 1.65, a)
+            print(i, j, max_forces[i, j])
+    # fig=plt.figure(figsize=(8, 4))
+    if filter > 0:
+        print("Filtering")
+        max_forces = median_filter(max_forces, size=filter)
+    plt.imshow(max_forces)
+    ax = plt.gca()
+    ax.set_xticks(np.linspace(0, dim, 10))
+    ax.set_yticks(np.linspace(0, dim, 10))
+    ax.set_xticklabels([round(a) for a in np.linspace(a_range[0], a_range[1], 10)])
+    ax.set_yticklabels([round(wh) for wh in np.linspace(wh_range[0], wh_range[1], 10)])
+    plt.xlabel("a (mm) - Distance between diaphragms")
+    plt.ylabel("Web Height (mm)")
+    bar = plt.colorbar()
+    bar.ax.set_title("Max Force (N)")
+    os.makedirs(img_folder, exist_ok=True)
+    plt.savefig(f'./{img_folder}/forces_{dim}x{dim}_{"optimized" if optimize else "basic"}{"_filtered"+str(filter) if filter > 0 else ""}.png')
+
 if __name__ == "__main__":
     max_area = 813 * 1016
     start_web_height = 200
@@ -173,17 +242,9 @@ if __name__ == "__main__":
 
     print(f"Start - Max Force: {start_max_force}   Area: {start_area}   Area Left: {max_area - start_area}")
 
-    # best_web_height, best_flange_width, best_glue_width, best_a = optimize(start_web_height, start_flange_width, start_glue_width, start_a)
-    # best_max_force = get_max_force(best_web_height, best_flange_width, best_glue_width, best_a)
-    # best_area = area(best_web_height, best_flange_width, best_glue_width, 120, 950, 1.27, best_a)
-
-    # print(f"End - Max Force: {best_max_force}   Area: {best_area}   Area Left: {max_area - best_area}")
-    # num_diaphragms = np.ceil(950 / best_a)
-    # print(f"Best a: {best_a}   Best Number of Diaphragms: {num_diaphragms}   Best Height: {best_web_height}   Best Flange Width: {best_flange_width}   Best Glue Width: {best_glue_width}")
-    # best_max_force, area_left, best_web_height, best_flange_width, best_glue_width, best_a, best_num_diaphragms = search([start_web_height, start_flange_width, start_glue_width, start_a], max_area, 950)
-    # print(f"End - Max Force: {best_max_force}   Area: {max_area - area_left}   Area Left: {area_left}")
-    # print(f"Best a: {best_a}   Best Number of Diaphragms: {best_num_diaphragms}   Best Height: {best_web_height}   Best Flange Width: {best_flange_width}   Best Glue Width: {best_glue_width}")
     best_max_force, area_left, best_web_height, best_flange_width, best_glue_width, best_a, best_num_diaphragms = search_area([50, 200, 4], [5, 30, 4], [1, 11, 4], [10, 300, 4])
-    print(f"End - Max Force: {best_max_force}   Area: {max_area - area_left}   Area Left: {area_left}")
-    print(f"Best a: {best_a}   Best Number of Diaphragms: {best_num_diaphragms}   Best Height: {best_web_height}   Best Flange Width: {best_flange_width}   Best Glue Width: {best_glue_width}")
+    print(f"End - Max Force: {round(best_max_force, 2)}   Area: {round(max_area - area_left, 2)}   Area Left: {round(area_left, 2)}")
+    print(f"Best a: {round(best_a, 2)}   Best Number of Diaphragms: {round(best_num_diaphragms, 2)}   Best Height: {round(best_web_height, 2)}   Best Flange Width: {round(best_flange_width, 2)}   Best Glue Width: {round(best_glue_width, 2)}")
+
+    # plot_max_forces(dim=100, optimize=True, filter=5)
 
