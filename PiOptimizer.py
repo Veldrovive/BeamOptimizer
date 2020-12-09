@@ -2,10 +2,17 @@ import numpy as np
 from scipy.optimize import minimize
 from scipy.ndimage import median_filter
 import matplotlib.pyplot as plt
+from operator import itemgetter
 import os
 
-def area(web_height, flange_width, glue_width, bridge_width, bridge_length, thickness, a):
-    num_diaphragms = np.ceil(bridge_length / a)
+"""
+There's a lot of duplicate code here and a ton of inefficiencies. If you're here trying to learn something, search elsewhere.
+If you want to find the optimal shape for your pi-beam bridge, just set your parameters and run the code. Where are the parameters? I'm glad you asked.
+They are all throughout the code in random places and some are set multiple times with the same value, but will mess up if you change only one of them. Have fun.
+"""
+
+def area(web_height, flange_width, glue_width, bridge_width, bridge_length, thickness, a = 100, num_diaphragms_override = None):
+    num_diaphragms = num_diaphragms_override if num_diaphragms_override is not None else np.ceil(bridge_length / a)
     deck_area = bridge_length * bridge_width * 2
     diaphragm_area = num_diaphragms * web_height * (bridge_width - 2 * flange_width - 2 * thickness)
     glue_pad_area = 2 * bridge_length * glue_width
@@ -52,9 +59,13 @@ def get_max_force(web_height, flange_width, glue_width, a = 300, moment = 280, s
         return (max_compressive_stress * i) / (moment * y_top)
 
     def get_shear_failure_load(max_shear, i, web_thickness, shear, q_neutral):
+        if shear == 0:
+            return np.inf
         return (2 * max_shear * web_thickness * i) / (shear * q_neutral)
 
     def get_glue_failure_load(max_glue_shear, i, glue_width, shear, q_glue):
+        if shear == 0:
+            return np.inf
         return (2 * max_glue_shear * glue_width * i) / (shear * q_glue)
 
     def get_two_restrained_buckling_load(E, poisson, deck_thickness, deck_center_width, moment, y_top, i):
@@ -69,8 +80,10 @@ def get_max_force(web_height, flange_width, glue_width, a = 300, moment = 280, s
         critical_stress = ((6 * np.pi**2 * E) / (12 * (1 - poisson**2))) * (web_thickness / web_above_neutral_axis)**2
         return (critical_stress * i) / (moment * web_above_neutral_axis)
 
-    def get_web_shear_load(E, poisson, web_thickness, web_height, i, shear, q_neutral):
+    def get_web_shear_load(E, poisson, web_thickness, web_height, i, shear, q_neutral, a):
         critical_shear = ((5 * np.pi**2 * E) / (12 * (1 - poisson**2))) * ((web_thickness / web_height)**2 + (web_thickness / a)**2)
+        if shear == 0:
+            return np.inf
         return (2 * critical_shear * i * web_thickness) / (shear * q_neutral)
 
     tensile_failure = get_tensile_failure_load(max_tensile_stress, i, moment, y_bot)
@@ -80,16 +93,228 @@ def get_max_force(web_height, flange_width, glue_width, a = 300, moment = 280, s
     two_restrained_buckling_failure = get_two_restrained_buckling_load(E, poisson, deck_thickness, deck_center_width, moment, y_top, i)
     one_restrained_buckling_failure = get_one_restrained_buckling_load(E, poisson, deck_thickness, flange_width, moment, y_top, i)
     web_buckling_failure = get_web_buckling_load(E, poisson, web_thickness, web_above_neutral_axis, moment, i)
-    web_shear_failure = get_web_shear_load(E, poisson, web_thickness, web_height, i, shear, q_neutral)
-    # print("Tensile:", tensile_failure, "   Crushing:", crushing_failure, "   Shear:", shear_failure, "   Glue:", glue_failure, "   Two:", two_restrained_buckling_failure, "   One:", one_restrained_buckling_failure, "   Web Buckle:", web_buckling_failure, "   Web Shear:", web_shear_failure)
+    web_shear_failure = get_web_shear_load(E, poisson, web_thickness, web_height, i, shear, q_neutral, a)
+    print("Tensile:", tensile_failure, "   Crushing:", crushing_failure, "   Shear:", shear_failure, "   Glue:", glue_failure, "   Two:", two_restrained_buckling_failure, "   One:", one_restrained_buckling_failure, "   Web Buckle:", web_buckling_failure, "   Web Shear:", web_shear_failure)
 
     return min(tensile_failure, crushing_failure, shear_failure, glue_failure, two_restrained_buckling_failure, one_restrained_buckling_failure, web_buckling_failure, web_shear_failure)
+
+def parabolic_area(h_naught, h, flange_width, glue_width, a, bridge_length):
+    num_diaphragms = int(np.ceil(bridge_length / a))
+    edge_space = (bridge_length - a * (num_diaphragms - 1)) / 2
+
+    def get_midpoint(n):
+        if n == 0:
+            x = (bridge_length - a*(num_diaphragms - 1)) / 4 - bridge_length / 2
+        elif n == num_diaphragms:
+            x = bridge_length / 2 - (bridge_length - a*(num_diaphragms - 1)) / 4
+        else:
+            x = (bridge_length - a*(num_diaphragms - 1)) / 2 + (a*(2*n - 1)) / 2 - bridge_length / 2
+        return x
+
+    curvature = (h - h_naught) * (2 / bridge_length) ** 2  # goes into the equation h(x)=-curvature * x^2 - h_naught to define a parabola
+    def get_midpoint_height(n):
+        x = get_midpoint(n)
+        return -1*curvature*x**2 - h_naught
+
+    def get_section_a(n):
+        if n == 0 or n == num_diaphragms:
+            return edge_space
+        else:
+            return a
+
+    def get_diaphragm_height(n):
+        # We assume that the n-th [0-(num_diaphragms - 1)] diaphragm takes the height of the section next to it
+        section_num = n if n < num_diaphragms/2 else n+1
+        return get_midpoint_height(section_num)
+
+    total_area = 0
+    for section_number in range(num_diaphragms + 1):
+        web_height = abs(get_midpoint_height(section_number))
+        bridge_width = 120
+        sec_bridge_length = get_section_a(section_number)
+        thickness = 1.27
+        total_area += area(web_height, flange_width, glue_width, bridge_width, sec_bridge_length, thickness, num_diaphragms_override = 0)
+
+        if section_number < num_diaphragms:
+            width = bridge_width - 2 * flange_width - 2 * thickness
+            total_area += web_height * width
+    return total_area
+
+def get_parabolic_bridge_geometry(h_naught, h, flange_width, glue_width, a, bridge_length, max_area = 813 * 1016):
+    num_diaphragms = int(np.ceil(bridge_length / a))
+    edge_space = (bridge_length - a * (num_diaphragms - 1)) / 2
+
+    area = parabolic_area(h_naught, h, flange_width, glue_width, a, bridge_length)
+
+    def get_midpoint(n):
+        if n == 0:
+            x = (bridge_length - a*(num_diaphragms - 1)) / 4 - bridge_length / 2
+        elif n == num_diaphragms:
+            x = bridge_length / 2 - (bridge_length - a*(num_diaphragms - 1)) / 4
+        else:
+            x = (bridge_length - a*(num_diaphragms - 1)) / 2 + (a*(2*n - 1)) / 2 - bridge_length / 2
+        return x
+
+    curvature = (h - h_naught) * (2 / bridge_length) ** 2  # goes into the equation h(x)=-curvature * x^2 - h_naught to define a parabola
+    def get_midpoint_height(n):
+        x = get_midpoint(n)
+        return -1*curvature*x**2 - h_naught
+
+    def get_section_a(n):
+        if n == 0 or n == num_diaphragms:
+            return edge_space
+        else:
+            return a
+
+    def get_diaphragm_height(n):
+        # We assume that the n-th [0-(num_diaphragms - 1)] diaphragm takes the height of the section next to it
+        section_num = n if n < num_diaphragms/2 else n+1
+        return get_midpoint_height(section_num)
+
+    section_heights = [0] * (num_diaphragms + 1)
+    diaphragm_heights = [0] * num_diaphragms
+    diaphragm_locations = [0] * num_diaphragms
+    for section_number in range(num_diaphragms + 1):
+        mid = get_midpoint(section_number)
+        sec_a = get_section_a(section_number)
+        web_height = abs(get_midpoint_height(section_number))
+        section_heights[section_number] = web_height
+
+        if section_number < num_diaphragms:
+            diaphragm_locations[section_number] = mid + sec_a/2
+            diaphragm_heights[section_number] = web_height
+    return section_heights, diaphragm_heights, diaphragm_locations, flange_width, glue_width, area, max_area - area, bridge_length
+
+def get_parabolic_bridge_max_force(h_naught, h, flange_width, glue_width, a, bridge_length):
+    num_diaphragms = int(np.ceil(bridge_length / a))
+    edge_space = (bridge_length - a * (num_diaphragms - 1)) / 2
+
+    def get_midpoint(n):
+        if n == 0:
+            x = (bridge_length - a*(num_diaphragms - 1)) / 4 - bridge_length / 2
+        elif n == num_diaphragms:
+            x = bridge_length / 2 - (bridge_length - a*(num_diaphragms - 1)) / 4
+        else:
+            x = (bridge_length - a*(num_diaphragms - 1)) / 2 + (a*(2*n - 1)) / 2 - bridge_length / 2
+        return x
+
+    curvature = (h - h_naught) * (2 / bridge_length) ** 2  # goes into the equation h(x)=-curvature * x^2 - h_naught to define a parabola
+    def get_midpoint_height(n):
+        x = get_midpoint(n)
+        return -1*curvature*x**2 - h_naught
+
+    def get_section_a(n):
+        if n == 0 or n == num_diaphragms:
+            return edge_space
+        else:
+            return a
+
+    def get_point_shear(x):
+        if x <= -1 * 0.2053 * bridge_length or x >= 0.2053 * bridge_length:
+            return 1
+        else:
+            return 0
+
+    def get_point_moment(x):
+        if x <= -1 * 0.2053 * bridge_length:
+            return ((x / bridge_length) + 0.5) * (280 / 0.294)
+        elif x >= 0.2053 * bridge_length:
+            return (0.5 - (x / bridge_length)) * (280 / 0.294)
+        else:
+            return 280
+
+    def get_range(n):
+        mid = get_midpoint(n)
+        a = get_section_a(n)
+        return (mid - a/2, mid, mid + a/2)
+
+    def get_section_max_shear(n):
+        shear_range = get_range(n)
+        return max([get_point_shear(x) for x in shear_range])
+
+    def get_section_max_moment(n):
+        moment_range = get_range(n)
+        return max([get_point_moment(x) for x in moment_range])
+
+    min_force = None
+    for section_number in range(num_diaphragms + 1):
+        height = abs(get_midpoint_height(section_number))
+        section_a = get_section_a(section_number)
+        shear = get_section_max_shear(section_number)
+        moment = get_section_max_moment(section_number)
+        max_force = get_max_force(height, flange_width, glue_width, section_a, moment, shear)
+        if min_force is None or min_force < max_force:
+            min_force = max_force
+    return 0 if min_force is None else min_force
+
+def optimize_parabolic(h_naught_guess = 100, h_guess = 250, flange_guess = 25, glue_guess = 2, a_guess = 100, max_area = 813 * 1016):
+    bridge_width = 120
+    thickness = 1.27
+    max_h = 200
+    max_h_naught = max_h
+    max_glue_width = 30
+    min_a = 100
+    def area_con(x):
+        h_naught, h, flange_width, glue_width, a = x
+        return max_area - parabolic_area(h_naught, h, flange_width, glue_width, a, 950)
+    def flange_con(x):
+        h_naught, h, flange_width, glue_width, a = x
+        return flange_width
+    def flange_con_2(x):
+        h_naught, h, flange_width, glue_width, a = x
+        return bridge_width / 2 - 2 * glue_width - flange_width
+    def h_naught_con(x):
+        h_naught, h, flange_width, glue_width, a = x
+        return h_naught
+    def h_naught_con_2(x):
+        h_naught, h, flange_width, glue_width, a = x
+        return max_h_naught - h_naught
+    def h_con(x):
+        h_naught, h, flange_width, glue_width, a = x
+        return h
+    def h_con_2(x):
+        h_naught, h, flange_width, glue_width, a = x
+        return max_h - h
+    def glue_con(x):
+        h_naught, h, flange_width, glue_width, a = x
+        return glue_width - thickness
+    def glue_con_2(x):
+        h_naught, h, flange_width, glue_width, a = x
+        return max_glue_width - glue_width
+    def a_con(x):
+        h_naught, h, flange_width, glue_width, a = x
+        return a
+    def a_con_2(x):
+        h_naught, h, flange_width, glue_width, a = x
+        return min_a - a
+
+    def optimize(x):
+        h_naught, h, flange_width, glue_width, a = x
+        max_force = get_parabolic_bridge_max_force(h_naught, h, flange_width, glue_width, a, 950)
+        print("Optimizing: ", [round(p, 2) for p in (h_naught, h, flange_width, glue_width, a, max_force)])
+        return -1 * max_force
+
+    cons = [
+        {'type': 'ineq', 'fun': area_con},
+        {'type': 'ineq', 'fun': flange_con},
+        {'type': 'ineq', 'fun': flange_con_2},
+        {'type': 'ineq', 'fun': h_naught_con},
+        {'type': 'ineq', 'fun': h_naught_con_2},
+        {'type': 'ineq', 'fun': h_con},
+        {'type': 'ineq', 'fun': h_con_2},
+        {'type': 'ineq', 'fun': glue_con},
+        {'type': 'ineq', 'fun': glue_con_2},
+        {'type': 'ineq', 'fun': a_con},
+        {'type': 'ineq', 'fun': a_con_2}
+    ]
+    res = minimize(optimize, [h_naught_guess, h_guess, flange_guess, glue_guess, a_guess], constraints=cons, options={'verbose': 1})
+    return res.x
 
 def optimize(web_height_guess = 100, flange_guess = 20, glue_guess = 5, a_guess = 100, max_area = 813 * 1016):
     bridge_width = 120
     thickness = 1.27
-    max_web_height = 250
-    max_glue_width = 30
+    max_web_height = 200 - 2*thickness
+    max_glue_width = 100
     def area_con(x):
         web_height, flange_width, glue_width, a = x
         return max_area - area(web_height, flange_width, glue_width, bridge_width, 950, thickness, a)
@@ -234,6 +459,8 @@ def plot_max_forces(dim = 100, wh_range = [50, 300], a_range=[10, 200], img_fold
 if __name__ == "__main__":
     max_area = 813 * 1016
     start_web_height = 200
+    start_h_naught = 100
+    start_h = 250
     start_flange_width = 20
     start_glue_width = 10
     start_a = 300
@@ -247,4 +474,19 @@ if __name__ == "__main__":
     print(f"Best a: {round(best_a, 2)}   Best Number of Diaphragms: {round(best_num_diaphragms, 2)}   Best Height: {round(best_web_height, 2)}   Best Flange Width: {round(best_flange_width, 2)}   Best Glue Width: {round(best_glue_width, 2)}")
 
     # plot_max_forces(dim=100, optimize=True, filter=5)
+
+    # start_max_force_parabolic = get_parabolic_bridge_max_force(start_h_naught, start_h, start_flange_width, start_glue_width, start_a, 950)
+    # start_area_parabolic = parabolic_area(start_h_naught, start_h_naught, start_flange_width, start_glue_width, start_a, 950)
+    # print(f"Start - Max Force: {start_max_force_parabolic}   Area: {start_area_parabolic}   Area Left: {max_area - start_area_parabolic}")
+
+    # best_h_naught, best_h, best_flange_width, best_glue_width, best_a = optimize_parabolic(start_h_naught, start_h, start_flange_width, start_glue_width, start_a)
+    # best_max_force_parabolic = get_parabolic_bridge_max_force(best_h_naught, best_h, best_flange_width, best_glue_width, best_a, 950)
+    # print(best_max_force_parabolic)
+    # print(best_h_naught, best_h, best_flange_width, best_glue_width, best_a)
+
+    # section_heights, diaphragm_heights, diaphragm_locations, flange_width, glue_width, area, area_left, bridge_length = get_parabolic_bridge_geometry(best_h_naught, best_h, best_flange_width, best_glue_width, best_a, 950)
+    # print("Section Heights: ", [round(h) for h in section_heights])
+    # print("Diaphragm Heights:", [round(h) for h in diaphragm_heights])
+    # print("Diaphragm Locations:", [round(h) for h in diaphragm_locations])
+    # print(f"Area used: {area}, Area left: {area_left}")
 
